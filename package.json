@@ -1,0 +1,36 @@
+{
+  "name": "claude-panel",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Always-on-top widget showing the live state of Claude Code sessions (unofficial).",
+  "license": "MIT",
+  "author": "Dionel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dioneldaf/claude-panel.git"
+  },
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "icons": "node scripts/gen-icons.mjs",
+    "tauri": "tauri",
+    "app:dev": "cargo build -p cpanel-hook && tauri dev",
+    "app:exe": "node scripts/build-release.mjs --no-bundle",
+    "app:build": "node scripts/build-release.mjs",
+    "check-version": "node scripts/check-version.mjs",
+    "test:all": "cargo test --workspace && vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5",
+    "vite": "^7",
+    "vitest": "^3"
+  }
+}

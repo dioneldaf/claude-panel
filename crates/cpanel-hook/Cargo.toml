@@ -1,0 +1,13 @@
+[package]
+name = "cpanel-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Fire-and-forget Claude Code hook that forwards a compact event summary to Claude Panel."
+
+[dependencies]
+cpanel-core = { path = "../cpanel-core" }
+
+serde_json.workspace = true

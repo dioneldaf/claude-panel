@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Panel</title>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="carrier">
+      <div id="wobble">
+        <div id="panel" data-mode="full">
+          <section class="view full" aria-label="Claude Code sessions">
+            <header>
+              <canvas id="mascot" width="20" height="16"></canvas>
+              <div class="titles">
+                <div id="title"></div>
+                <div id="summary"></div>
+              </div>
+              <div class="actions">
+                <button id="btn-mute" class="icon-btn" type="button"></button>
+                <button id="btn-mini" class="icon-btn" type="button" title="Mini mode" aria-label="Mini mode"></button>
+                <button id="btn-hide" class="icon-btn" type="button" title="Hide to tray" aria-label="Hide to tray"></button>
+              </div>
+            </header>
+            <ul id="rows"></ul>
+            <p id="empty" hidden>No active sessions.</p>
+            <div id="legend" hidden></div>
+            <div id="hooks" hidden></div>
+            <footer>
+              <button id="btn-legend" class="icon-btn" type="button" title="Legend" aria-label="Legend"></button>
+              <button id="btn-hooks" class="icon-btn" type="button" title="Hooks" aria-label="Hooks"></button>
+              <button id="hint" type="button" hidden></button>
+              <span id="demo-badge" hidden></span>
+            </footer>
+          </section>
+          <section class="view mini" aria-label="Session lights" title="Double-click to expand">
+            <div id="pill"></div>
+          </section>
+        </div>
+      </div>
+      </div>
+      <div id="fx" aria-hidden="true"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "Dionel",
+    "copyright": "Copyright (c) 2026 Dionel",
+    "category": "DeveloperTool",
+    "shortDescription": "Status panel for Claude Code sessions",
+    "longDescription": "An always-on-top widget that shows the live state of every open Claude Code session. Unofficial community project, not affiliated with Anthropic.",
+    "homepage": "https://github.com/dioneldaf/claude-panel",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "bin/cpanel-hook.exe": "cpanel-hook.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  }
+}

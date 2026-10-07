@@ -1,0 +1,588 @@
+/* Claude Panel: pixel-art widget. Limited palette, crisp edges, stepped motion. */
+
+:root {
+  --bg: rgb(22 18 28 / 0.9);
+  --line: #3a3346;
+  --text: #f2e9dc;
+  --dim: #9a8fa3;
+  --orange: #d97757;
+  --green: #5fd35f;
+  --amber: #f2b63d;
+  --red: #ff5a4f;
+  --blue: #6ec1ff;
+  --grey: #6b6474;
+
+  /* Strong ease-out for anything that responds to the user. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  /* The same curve quantised to five frames: instant first move, pixel-art cadence. */
+  --step-out: linear(0, 0.58 0% 20%, 0.85 20% 40%, 0.95 40% 60%, 0.99 60% 80%, 1 80% 100%);
+
+  --pad: 14px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Outside Tauri (browser preview) there is no desktop behind the panel. */
+html.browser {
+  background: #23262f;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+body {
+  color: var(--text);
+  font: 11px/1.25 "Cascadia Mono", "Cascadia Code", Consolas, "Lucida Console", monospace;
+}
+
+canvas,
+.pixel-text,
+.icon {
+  image-rendering: pixelated;
+}
+
+#stage {
+  position: relative;
+  display: inline-block;
+  padding: var(--pad);
+}
+
+/* Drag physics are written to this element; mode transitions to #panel. */
+#wobble {
+  transform-origin: 50% 12%;
+  will-change: transform;
+}
+
+#panel {
+  position: relative;
+  border: 6px solid transparent;
+  /* Nine-slice frame with stepped corners; the centre slice is the translucent fill. */
+  border-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' shape-rendering='crispEdges'%3E%3Cpath fill='rgb(22,18,28)' fill-opacity='.9' d='M4 2h10v2h2v10h-2v2h-10v-2h-2v-10h2z'/%3E%3Cpath fill='rgb(58,51,70)' d='M4 0h10v2h-10zM4 16h10v2h-10zM0 4h2v10h-2zM16 4h2v10h-2zM2 2h2v2h-2zM14 2h2v2h-2zM2 14h2v2h-2zM14 14h2v2h-2z'/%3E%3C/svg%3E")
+    6 fill / 6px / 0 stretch;
+  image-rendering: pixelated;
+  cursor: grab;
+}
+
+/* A session needs the user: the frame turns red. */
+#panel[data-alert] {
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' shape-rendering='crispEdges'%3E%3Cpath fill='rgb(22,18,28)' fill-opacity='.9' d='M4 2h10v2h2v10h-2v2h-10v-2h-2v-10h2z'/%3E%3Cpath fill='rgb(255,90,79)' d='M4 0h10v2h-10zM4 16h10v2h-10zM0 4h2v10h-2zM16 4h2v10h-2zM2 2h2v2h-2zM14 2h2v2h-2zM2 14h2v2h-2zM14 14h2v2h-2z'/%3E%3C/svg%3E");
+}
+
+:root[data-dragging] #panel {
+  cursor: grabbing;
+}
+
+/* ---------- presence (entrance / exit) ---------- */
+
+/* No sessions: nothing is painted even if the window were shown. */
+#panel[data-presence="hidden"] {
+  visibility: hidden;
+}
+
+/* Rows wait off-stage until the entrance lets them in (and leave first on exit). */
+#panel[data-rows="hidden"] .row {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/* ---------- mode views ---------- */
+
+.view {
+  transform-origin: 0 0;
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--step-out);
+}
+
+#panel[data-mode="full"] .mini,
+#panel[data-mode="mini"] .full {
+  display: none;
+}
+
+/* Entering view: never from nothing; a slightly smaller, transparent version of itself. */
+@starting-style {
+  .view {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+}
+
+/* Leaving is faster than entering: the system responds, the user does not wait. */
+#panel[data-leaving] .view {
+  opacity: 0;
+  transform: scale(0.94);
+  transition-duration: 120ms;
+}
+
+.full {
+  width: 276px;
+}
+
+/* ---------- header ---------- */
+
+header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 4px;
+}
+
+#mascot {
+  width: 60px;
+  height: 48px;
+  flex: none;
+  transform-origin: 50% 20%;
+  will-change: transform;
+}
+
+.titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+#title {
+  color: var(--orange);
+  line-height: 0;
+}
+
+#summary {
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Out of flow so the summary can use the full width under the buttons. */
+.actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  gap: 2px;
+}
+
+/* ---------- buttons ---------- */
+
+.icon-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition:
+    transform 120ms var(--ease-out),
+    color 120ms ease,
+    background-color 120ms ease;
+}
+
+.icon-btn:active,
+.text-btn:active,
+#hint:active {
+  transform: scale(0.9);
+}
+
+.icon-btn:focus-visible,
+.text-btn:focus-visible,
+#hint:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.icon-btn[aria-pressed="true"] {
+  color: var(--orange);
+}
+
+.icon-btn .slash {
+  position: absolute;
+  color: var(--red);
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 120ms ease,
+    transform 160ms var(--step-out);
+}
+
+.icon-btn[data-muted] .slash {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.text-btn {
+  padding: 3px 8px;
+  border: 2px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 120ms var(--ease-out),
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.text-btn:disabled {
+  color: var(--grey);
+  cursor: default;
+}
+
+.text-btn[data-armed] {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn:hover {
+    color: var(--text);
+    background-color: rgb(255 255 255 / 0.08);
+  }
+  .text-btn:not(:disabled):hover {
+    border-color: var(--dim);
+    background-color: rgb(255 255 255 / 0.06);
+  }
+  .row:hover {
+    background-color: rgb(255 255 255 / 0.06);
+  }
+  .row:hover .light {
+    transform: scale(1.2);
+  }
+  #hint:hover {
+    color: var(--text);
+  }
+}
+
+/* ---------- rows ---------- */
+
+#rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 2px solid var(--line);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px;
+  border-bottom: 2px solid rgb(58 51 70 / 0.5);
+  transition:
+    background-color 120ms ease,
+    opacity 160ms var(--ease-out),
+    transform 200ms var(--step-out);
+  /* Rows cascade in on first paint; the delay is cleared right after. */
+  transition-delay: calc(var(--i, 0) * 40ms);
+}
+
+@starting-style {
+  .row {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.row[data-leaving] {
+  opacity: 0;
+  transition-delay: 0ms;
+}
+
+.who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.name,
+.folder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.name {
+  font-weight: 700;
+}
+
+.folder {
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.what {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  color: var(--c);
+}
+
+.state-label {
+  line-height: 0;
+}
+
+.elapsed {
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1;
+}
+
+#empty {
+  margin: 0;
+  padding: 12px 6px;
+  color: var(--dim);
+  text-align: center;
+  border-top: 2px solid var(--line);
+}
+
+/* ---------- traffic lights ---------- */
+
+[data-state="working"] {
+  --c: var(--green);
+}
+[data-state="needs_you"] {
+  --c: var(--red);
+}
+[data-state="done"] {
+  --c: var(--blue);
+}
+[data-state="waiting_subagent"],
+[data-state="waiting_process"] {
+  --c: var(--amber);
+}
+[data-state="paused"] {
+  --c: var(--grey);
+}
+
+.light {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  background: var(--c);
+  /* Pixel bevel plus a square halo; no blur anywhere. */
+  box-shadow:
+    inset 2px 2px 0 rgb(255 255 255 / 0.4),
+    inset -2px -2px 0 rgb(0 0 0 / 0.3),
+    0 0 0 2px color-mix(in srgb, var(--c) 30%, transparent);
+  transition: transform 120ms var(--ease-out);
+}
+
+[data-state="paused"] .light,
+.light[data-state="paused"] {
+  box-shadow: inset -2px -2px 0 rgb(0 0 0 / 0.3);
+  opacity: 0.7;
+}
+
+/* Subagent and process share amber; the process light is hollow. */
+[data-state="waiting_process"] .light,
+.light[data-state="waiting_process"] {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 3px var(--c),
+    0 0 0 2px color-mix(in srgb, var(--c) 30%, transparent);
+}
+
+/* Blinking is driven by one low-frequency beat (data-beat 0..3, 300 ms each)
+   instead of per-light animations, so an idle panel schedules no frames. */
+:root:is([data-beat="2"], [data-beat="3"]) :is([data-state="working"] .light, .light[data-state="working"]) {
+  opacity: 0.45;
+}
+:root:is([data-beat="1"], [data-beat="3"]) :is([data-state="needs_you"] .light, .light[data-state="needs_you"]) {
+  opacity: 0.3;
+}
+:root[data-beat="3"] :is([data-state^="waiting_"] .light, .light[data-state^="waiting_"]) {
+  opacity: 0.35;
+}
+:root:is([data-beat="1"], [data-beat="3"]) #panel[data-alert] {
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' shape-rendering='crispEdges'%3E%3Cpath fill='rgb(22,18,28)' fill-opacity='.9' d='M4 2h10v2h2v10h-2v2h-10v-2h-2v-10h2z'/%3E%3Cpath fill='rgb(140,52,48)' d='M4 0h10v2h-10zM4 16h10v2h-10zM0 4h2v10h-2zM16 4h2v10h-2zM2 2h2v2h-2zM14 2h2v2h-2zM2 14h2v2h-2zM14 14h2v2h-2z'/%3E%3C/svg%3E");
+}
+
+/* ---------- legend, hooks, footer ---------- */
+
+#legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  padding: 8px 6px;
+  border-bottom: 2px solid rgb(58 51 70 / 0.5);
+}
+
+#legend[hidden],
+#hooks[hidden] {
+  display: none;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  line-height: 0;
+}
+
+#hooks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 6px;
+  border-bottom: 2px solid rgb(58 51 70 / 0.5);
+  color: var(--dim);
+}
+
+#hooks p {
+  margin: 0;
+}
+
+#hooks .profile {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+}
+
+#hooks .profile [data-hooks="installed"] {
+  color: var(--green);
+}
+#hooks .profile [data-hooks="broken"] {
+  color: var(--red);
+}
+#hooks .profile [data-hooks="partial"] {
+  color: var(--amber);
+}
+#hooks .profile [data-hooks="not_installed"] {
+  color: var(--dim);
+}
+
+#hooks .buttons {
+  display: flex;
+  gap: 6px;
+}
+
+#hooks .result {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+#hooks .result[data-error] {
+  color: var(--red);
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-top: 2px;
+  min-height: 24px;
+}
+
+#hint {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--grey);
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    transform 120ms var(--ease-out);
+}
+
+#demo-badge {
+  margin-left: auto;
+  padding: 3px 4px;
+  color: var(--amber);
+  line-height: 0;
+}
+
+/* ---------- mini pill ---------- */
+
+#pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 14px;
+  min-height: 14px;
+  padding: 3px 4px;
+}
+
+#pill:empty::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: var(--grey);
+  opacity: 0.5;
+}
+
+/* ---------- effects ---------- */
+
+#fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.dust {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  background: var(--text);
+}
+
+/* ---------- reduced motion: keep colour and opacity, drop movement ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .view,
+  .row,
+  .light,
+  .icon-btn,
+  .text-btn,
+  #hint,
+  .icon-btn .slash {
+    transition-property: opacity, color, background-color, border-color;
+    transition-delay: 0ms;
+  }
+  .view,
+  #panel[data-leaving] .view,
+  .row,
+  #panel[data-rows="hidden"] .row,
+  .icon-btn:active,
+  .text-btn:active,
+  #hint:active,
+  .row:hover .light,
+  .icon-btn .slash {
+    transform: none;
+  }
+  @starting-style {
+    .view,
+    .row {
+      transform: none;
+    }
+  }
+}

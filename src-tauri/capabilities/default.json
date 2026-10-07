@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability set: the frontend only listens to events and calls app commands.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

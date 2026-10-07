@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Fails unless the tag is v<version> and package.json, Cargo.toml and
+      # tauri.conf.json all carry that version.
+      - name: Verify tag matches version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-version.mjs "$env:TAG"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Frontend tests
+        run: pnpm test
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      # Produces release/: NSIS installer, portable zip and SHA256SUMS.
+      - name: Build installer and portable archive
+        run: pnpm app:build
+
+      # Draft: the owner tests the installer before publishing the release.
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*-setup.exe
+            release/*-portable.zip
+            release/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
