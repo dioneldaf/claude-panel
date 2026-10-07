@@ -4,18 +4,24 @@ on:
   push:
     tags: ["v*"]
 
+# Nothing gets write access by default; only the publish job asks for it.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # Runs third-party actions and npm / cargo build scripts, so it only reads.
+  build:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: pnpm
@@ -23,7 +29,7 @@ jobs:
       - name: Install Rust (stable)
         run: rustup toolchain install stable --profile minimal --no-self-update
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -51,16 +57,43 @@ jobs:
       - name: Build installer and portable archive
         run: pnpm app:build
 
-      # Draft: the owner tests the installer before publishing the release.
-      - name: Create draft GitHub release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          draft: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
+          name: release-files
+          if-no-files-found: error
+          retention-days: 7
+          path: |
             release/*-setup.exe
             release/*-portable.zip
             release/SHA256SUMS
+
+  # Holds the write permission, runs no project code and no third-party action:
+  # it only downloads the three files and creates the release with the GitHub CLI.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: release
+
+      - name: Verify checksums
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+
+      # Draft: the owner tests the installer before publishing the release.
+      - name: Create draft GitHub release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: >
+          gh release create "$TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --draft
+          --verify-tag
+          --generate-notes
+          --title "$TAG"
+          release/*-setup.exe release/*-portable.zip release/SHA256SUMS

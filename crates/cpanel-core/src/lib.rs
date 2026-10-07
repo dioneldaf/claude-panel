@@ -8,6 +8,7 @@ pub mod autostart;
 pub mod demo;
 pub mod eventlog;
 pub mod hook_event;
+pub mod hookstate;
 pub mod model;
 pub mod notify;
 pub mod presence;
@@ -20,6 +21,10 @@ pub mod textdiff;
 /// title and installer name come from `productName` in `src-tauri/tauri.conf.json`
 /// and the frontend copy from `src/branding.ts`; a test keeps the three in sync.
 pub const PRODUCT_NAME: &str = "Claude Panel";
+
+/// Bundle identifier; names the per-user data folders. Must equal `identifier`
+/// in `src-tauri/tauri.conf.json` (checked by scripts/branding.test.mjs).
+pub const APP_IDENTIFIER: &str = "io.github.dioneldaf.claude-panel";
 
 /// Loopback UDP port the hook binary sends summaries to.
 pub const DEFAULT_PORT: u16 = 47615;

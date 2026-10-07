@@ -283,6 +283,27 @@ pub fn install_hooks(text: &str, cmd: &HookCommand) -> Result<String, SettingsEr
 /// Returns the settings text without any of our handlers.
 /// Returns the input unchanged when there is nothing to remove.
 pub fn remove_hooks(text: &str) -> Result<String, SettingsError> {
+    remove_hooks_where(text, |_| true)
+}
+
+/// Whether our entries are absent, present and healthy, or pointing at an
+/// executable that `exists` reports as gone.
+pub fn entries_state(text: &str, exists: impl Fn(&str) -> bool) -> crate::hookstate::Entries {
+    use crate::hookstate::Entries;
+    let commands = installed_hook_commands(text);
+    if commands.is_empty() {
+        Entries::Absent
+    } else if commands.iter().all(|command| exists(command)) {
+        Entries::Valid
+    } else {
+        Entries::Dangling
+    }
+}
+
+/// Like [`remove_hooks`], but only for our handlers whose `command` is accepted
+/// by `matches`. The uninstaller uses it to remove the entries of one
+/// installation while leaving those of another copy in place.
+pub fn remove_hooks_where(text: &str, matches: impl Fn(&str) -> bool) -> Result<String, SettingsError> {
     let original = parse(text)?;
     let mut root = original.clone();
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
@@ -301,7 +322,10 @@ pub fn remove_hooks(text: &str) -> Result<String, SettingsError> {
                 return true;
             };
             let before = handlers.len();
-            handlers.retain(|handler| !is_ours(handler));
+            handlers.retain(|handler| {
+                let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
+                !(is_ours(handler) && matches(command))
+            });
             let removed = handlers.len() != before;
             removed_here |= removed;
             // Drop a group only when removing our handler is what emptied it.
@@ -509,6 +533,15 @@ pub fn install_hooks_file(path: &Path, cmd: &HookCommand, stamp: &str) -> Result
 /// Removes the hooks from the settings file at `path`; a missing file is a no-op.
 pub fn remove_hooks_file(path: &Path, stamp: &str) -> Result<FileOutcome, SettingsError> {
     apply_to_file(path, stamp, false, remove_hooks, || {})
+}
+
+/// File-level [`remove_hooks_where`].
+pub fn remove_hooks_file_where(
+    path: &Path,
+    stamp: &str,
+    matches: impl Fn(&str) -> bool,
+) -> Result<FileOutcome, SettingsError> {
+    apply_to_file(path, stamp, false, |text| remove_hooks_where(text, &matches), || {})
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC for the given Unix time.

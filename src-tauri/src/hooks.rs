@@ -1,11 +1,13 @@
 //! Locating config directories and the hook executable, and applying the
 //! install / remove actions to each profile's `settings.json`.
 
+use cpanel_core::hookstate::{decide, same_path, Decision, HookState, STATE_FILE};
 use cpanel_core::model::ProfileView;
 use cpanel_core::registry::{discover_config_dirs, ConfigDir};
 use cpanel_core::settings::{
-    backup_stamp, hook_status, install_hooks, install_hooks_file, installed_hook_commands, remove_hooks,
-    remove_hooks_file, HookCommand, InstallStatus, HOOK_EXE_STEM,
+    backup_stamp, entries_state, hook_status, install_hooks, install_hooks_file, installed_hook_commands,
+    remove_hooks, remove_hooks_file, remove_hooks_file_where, FileOutcome, HookCommand, InstallStatus,
+    SettingsError, HOOK_EXE_STEM,
 };
 use cpanel_core::textdiff::diff_lines;
 use serde::Serialize;
@@ -68,14 +70,73 @@ pub fn config_dirs(explicit: &[PathBuf]) -> Vec<ConfigDir> {
     home_dir().map(|home| discover_config_dirs(&home)).unwrap_or_default()
 }
 
+/// Overrides the folder holding the hook state and the uninstall log (tests and
+/// trying the uninstall clean-up against copies).
+pub const STATE_DIR_ENV: &str = "CPANEL_STATE_DIR";
+
+/// `%APPDATA%\<identifier>`: the same folder Tauri uses as the config directory.
+fn config_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(STATE_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| home_dir().map(|h| h.join(".config")))?;
+    Some(base.join(cpanel_core::APP_IDENTIFIER))
+}
+
+/// Where the record of hook installations is kept.
+pub fn state_path() -> Option<PathBuf> {
+    config_home().map(|dir| dir.join(STATE_FILE))
+}
+
+/// Log written by the uninstall clean-up (read by nobody but the user).
+pub fn uninstall_log_path() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(STATE_DIR_ENV) {
+        return Some(PathBuf::from(dir).join("uninstall-cleanup.log"));
+    }
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    Some(base.join(cpanel_core::APP_IDENTIFIER).join("logs").join("uninstall-cleanup.log"))
+}
+
+fn hook_file_name() -> String {
+    if cfg!(windows) {
+        format!("{HOOK_EXE_STEM}.exe")
+    } else {
+        HOOK_EXE_STEM.to_string()
+    }
+}
+
+/// Where this installation's hook executable is expected, whether or not it exists.
+pub fn expected_hook_exe(app_exe: &Path) -> Option<String> {
+    Some(display(&app_exe.parent()?.join(hook_file_name())).replace('\\', "/"))
+}
+
+/// Runs a settings operation, retrying briefly when another program changed the
+/// file under us (Claude Code rewrites its settings now and then).
+pub fn retry_changed<T>(
+    attempts: u32,
+    delay: std::time::Duration,
+    mut operation: impl FnMut() -> Result<T, SettingsError>,
+) -> Result<T, SettingsError> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match operation() {
+            Err(SettingsError::Changed(_)) if tries < attempts => std::thread::sleep(delay),
+            other => return other,
+        }
+    }
+}
+
+const RETRIES: u32 = 5;
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Finds `cpanel-hook` for an application executable at `app_exe`.
 ///
 /// Every supported layout keeps the two executables side by side: the installed
 /// directory, the portable folder, `target/release` and `target/debug`. The path
 /// is returned with forward slashes, as it is written into `settings.json`.
 pub fn find_hook_exe(app_exe: &Path) -> Option<String> {
-    let name = if cfg!(windows) { format!("{HOOK_EXE_STEM}.exe") } else { HOOK_EXE_STEM.to_string() };
-    let candidate = app_exe.parent()?.join(name);
+    let candidate = app_exe.parent()?.join(hook_file_name());
     candidate.is_file().then(|| display(&candidate).replace('\\', "/"))
 }
 
@@ -172,18 +233,41 @@ fn stamp_now() -> String {
 
 /// Applies the action once per distinct settings file. Each file is backed up
 /// first and written atomically; a failure in one does not affect the others.
+#[cfg(test)]
 pub fn apply(action: Action, dirs: &[ConfigDir], exe: Option<&str>) -> Vec<ActionResult> {
+    apply_recorded(action, dirs, exe, None)
+}
+
+/// [`apply`], also recording in the state file which settings files the user
+/// installed hooks into (and forgetting those they removed them from).
+pub fn apply_recorded(
+    action: Action,
+    dirs: &[ConfigDir],
+    exe: Option<&str>,
+    state_file: Option<&Path>,
+) -> Vec<ActionResult> {
     let stamp = stamp_now();
-    targets(dirs)
+    let mut state = state_file.map(HookState::load);
+    let results = targets(dirs)
         .into_iter()
         .map(|target| {
-            let outcome = match (action, exe) {
-                (Action::Install, Some(exe)) => {
-                    install_hooks_file(&target.file, &command_for(&target.tag, exe), &stamp).map_err(|e| e.to_string())
-                }
+            let outcome: Result<FileOutcome, String> = match (action, exe) {
+                (Action::Install, Some(exe)) => retry_changed(RETRIES, RETRY_DELAY, || {
+                    install_hooks_file(&target.file, &command_for(&target.tag, exe), &stamp)
+                })
+                .map_err(|e| e.to_string()),
                 (Action::Install, None) => Err(NO_HOOK_EXE.to_string()),
-                (Action::Remove, _) => remove_hooks_file(&target.file, &stamp).map_err(|e| e.to_string()),
+                (Action::Remove, _) => {
+                    retry_changed(RETRIES, RETRY_DELAY, || remove_hooks_file(&target.file, &stamp)).map_err(|e| e.to_string())
+                }
             };
+            if let (Some(state), Ok(_)) = (state.as_mut(), &outcome) {
+                let file = display(&target.file);
+                match (action, exe) {
+                    (Action::Install, Some(exe)) => state.record_install(&file, &target.tag, exe),
+                    _ => state.forget(&file),
+                }
+            }
             let (ok, changed, backup, error) = match outcome {
                 Ok(o) => (true, o.changed, o.backup.map(|b| display(&b)), None),
                 Err(e) => (false, false, None, Some(e)),
@@ -198,7 +282,128 @@ pub fn apply(action: Action, dirs: &[ConfigDir], exe: Option<&str>) -> Vec<Actio
                 error,
             }
         })
-        .collect()
+        .collect();
+    if let (Some(state), Some(path)) = (state, state_file) {
+        state.save(path);
+    }
+    results
+}
+
+fn exists(command: &str) -> bool {
+    Path::new(command).is_file()
+}
+
+/// Start-up self-healing: restores hook entries in the settings files the user
+/// had installed them into when they went missing for a reason the user did not
+/// choose (an upgrade or cancelled uninstall removed them, or the installation
+/// moved and they dangle). Entries the user deleted by hand are not brought back.
+/// Returns the files that were repaired. Nothing is written when all is well.
+pub fn startup_repair(state_file: &Path, my_exe: &str) -> Vec<String> {
+    let mut state = HookState::load(state_file);
+    let before = state.clone();
+    let stamp = stamp_now();
+    let mut repaired = Vec::new();
+    for record in before.managed.iter() {
+        let file = Path::new(&record.file);
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let entries = entries_state(&text, exists);
+        match decide(record, my_exe, exists(&record.exe), entries) {
+            Decision::Repair => {
+                let cmd = command_for(&record.profile, my_exe);
+                if retry_changed(RETRIES, RETRY_DELAY, || install_hooks_file(file, &cmd, &stamp)).is_ok() {
+                    state.record_install(&record.file, &record.profile, my_exe);
+                    repaired.push(record.file.clone());
+                }
+            }
+            Decision::Forget => state.forget(&record.file),
+            // Healthy again (for example restored by another copy): nothing pending.
+            Decision::Keep if record.restore && same_path(&record.exe, my_exe) => {
+                state.record_install(&record.file, &record.profile, my_exe);
+            }
+            Decision::Keep => {}
+        }
+    }
+    if state != before {
+        state.save(state_file);
+    }
+    repaired
+}
+
+/// Text handed to the uninstaller for its message box: one path per line,
+/// shortened to fit NSIS string limits.
+pub fn leftover_report(leftovers: &[Leftover], max_chars: usize) -> String {
+    let mut out = String::new();
+    for (shown, leftover) in leftovers.iter().enumerate() {
+        let line = format!("{}\r\n", leftover.file);
+        if out.chars().count() + line.chars().count() > max_chars {
+            out.push_str(&format!("(and {} more)\r\n", leftovers.len() - shown));
+            break;
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
+/// A settings file the uninstaller could not clean.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Leftover {
+    pub file: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CleanupReport {
+    pub cleaned: Vec<String>,
+    pub leftovers: Vec<Leftover>,
+}
+
+/// Uninstall clean-up for the installation whose hook executable is `my_exe`.
+///
+/// Covers the discovered profiles *and* every settings file recorded in the state
+/// (hooks installed through `--config-dir` live outside the discovered ones).
+/// Removes only entries that point at this installation or at an executable that
+/// no longer exists; entries of another copy keep working. Cleaned files are
+/// marked for restoration, so an upgrade or a cancelled uninstall heals on the
+/// next start; the uninstaller deletes the state file once it has really finished.
+pub fn uninstall_cleanup(dirs: &[ConfigDir], state_file: Option<&Path>, my_exe: &str) -> CleanupReport {
+    let mut state = state_file.map(HookState::load).unwrap_or_default();
+    let mine = |command: &str| same_path(command, my_exe) || !exists(command);
+
+    // Candidate files, deduplicated by the file they resolve to.
+    let mut candidates: Vec<(PathBuf, String)> = targets(dirs).into_iter().map(|t| (t.file, t.tag)).collect();
+    for record in &state.managed {
+        let file = PathBuf::from(&record.file);
+        if !candidates.iter().any(|(known, _)| identity(known) == identity(&file)) {
+            candidates.push((file, record.profile.clone()));
+        }
+    }
+
+    let stamp = stamp_now();
+    let mut report = CleanupReport::default();
+    for (file, tag) in candidates {
+        let shown = display(&file);
+        match retry_changed(RETRIES, RETRY_DELAY, || remove_hooks_file_where(&file, &stamp, mine)) {
+            Ok(outcome) if outcome.changed => {
+                state.mark_restore_if_owned(&shown, &tag, my_exe, mine);
+                report.cleaned.push(shown);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // Only worth reporting when the file may really hold our entries.
+                let suspect = match std::fs::read(&file) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).contains(HOOK_EXE_STEM),
+                    Err(e) => e.kind() != ErrorKind::NotFound,
+                };
+                if suspect {
+                    report.leftovers.push(Leftover { file: shown, reason: error.to_string() });
+                }
+            }
+        }
+    }
+    if let Some(path) = state_file {
+        state.save(path);
+    }
+    report
 }
 
 /// Read-only preview of what [`apply`] would change, as `+`/`-` lines per file.
@@ -423,5 +628,283 @@ mod layout_tests {
         let removed = apply(Action::Remove, &dirs, None);
         assert!(removed[0].ok && removed[0].changed);
         assert_eq!(profile_views(&dirs, None)[0].hooks, "not_installed");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::fs;
+    use std::time::Duration;
+
+    const HOOK: &str = if cfg!(windows) { "cpanel-hook.exe" } else { "cpanel-hook" };
+
+    /// A fake installation: a folder with the hook executable, plus profiles.
+    struct World {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        state: PathBuf,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let state = root.join("appdata").join(STATE_FILE);
+            Self { _tmp: tmp, root, state }
+        }
+
+        /// Creates an application folder and returns its hook path (forward slashes).
+        fn install(&self, name: &str) -> String {
+            let dir = self.root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(HOOK), b"hook").unwrap();
+            display(&dir.join(HOOK)).replace('\\', "/")
+        }
+
+        fn profile(&self, name: &str) -> ConfigDir {
+            let path = self.root.join(name);
+            fs::create_dir_all(&path).unwrap();
+            ConfigDir { tag: name.trim_start_matches('.').to_string(), path }
+        }
+
+        fn settings(&self, profile: &ConfigDir) -> String {
+            fs::read_to_string(profile.path.join("settings.json")).unwrap_or_default()
+        }
+
+        fn backups(&self, profile: &ConfigDir) -> usize {
+            fs::read_dir(&profile.path).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains("cpanel-backup")).count()
+        }
+    }
+
+    #[test]
+    fn retry_gives_up_after_the_last_attempt_and_stops_at_the_first_success() {
+        let mut calls = 0;
+        let result = retry_changed(3, Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 { Err(SettingsError::Changed("x".into())) } else { Ok(calls) }
+        });
+        assert_eq!(result, Ok(3));
+
+        let mut calls = 0;
+        let result: Result<(), _> = retry_changed(3, Duration::ZERO, || {
+            calls += 1;
+            Err(SettingsError::Changed("still".into()))
+        });
+        assert!(matches!(result, Err(SettingsError::Changed(_))));
+        assert_eq!(calls, 3);
+
+        // Other errors are not retried.
+        let mut calls = 0;
+        let result: Result<(), _> = retry_changed(3, Duration::ZERO, || {
+            calls += 1;
+            Err(SettingsError::Parse("bad".into()))
+        });
+        assert!(matches!(result, Err(SettingsError::Parse(_))));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn installing_records_the_file_and_removing_forgets_it() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&exe), Some(&w.state));
+        let state = HookState::load(&w.state);
+        assert_eq!(state.managed.len(), 1);
+        assert!(same_path(&state.managed[0].exe, &exe));
+        assert!(!state.managed[0].restore);
+
+        apply_recorded(Action::Remove, &[p], Some(&exe), Some(&w.state));
+        assert!(!w.state.exists(), "an empty state leaves no file");
+    }
+
+    #[test]
+    fn an_upgrade_that_runs_the_old_uninstaller_heals_on_the_next_start() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&exe), Some(&w.state));
+        let installed = w.settings(&p);
+
+        // Old uninstaller: clean-up runs, the state file survives (in-place run).
+        let report = uninstall_cleanup(&[p.clone()], Some(&w.state), &exe);
+        assert_eq!(report.cleaned.len(), 1);
+        assert!(report.leftovers.is_empty());
+        assert!(!w.settings(&p).contains("cpanel-hook"));
+        assert!(HookState::load(&w.state).managed[0].restore);
+
+        // New version starts: the entries are back, exactly as before.
+        assert_eq!(startup_repair(&w.state, &exe).len(), 1);
+        assert_eq!(w.settings(&p), installed);
+        assert!(!HookState::load(&w.state).managed[0].restore);
+
+        // Further starts change nothing and add no backups.
+        let backups = w.backups(&p);
+        assert!(startup_repair(&w.state, &exe).is_empty());
+        assert!(startup_repair(&w.state, &exe).is_empty());
+        assert_eq!(w.backups(&p), backups);
+        assert_eq!(w.settings(&p), installed);
+    }
+
+    #[test]
+    fn a_completed_uninstall_leaves_no_entries_and_nothing_that_could_restore_them() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&exe), Some(&w.state));
+        uninstall_cleanup(&[p.clone()], Some(&w.state), &exe);
+        // The uninstaller's last step (NSIS_HOOK_POSTUNINSTALL) deletes the state file.
+        fs::remove_file(&w.state).unwrap();
+
+        // A later fresh installation starts clean.
+        let again = w.install("app");
+        assert!(startup_repair(&w.state, &again).is_empty());
+        assert!(!w.settings(&p).contains("cpanel-hook"));
+    }
+
+    #[test]
+    fn a_cancelled_uninstall_heals_like_an_upgrade() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&exe), Some(&w.state));
+        uninstall_cleanup(&[p.clone()], Some(&w.state), &exe);
+        // The user cancels at the "application is running" prompt: files and state stay.
+        assert_eq!(startup_repair(&w.state, &exe).len(), 1);
+        assert_eq!(profile_views(&[p], Some(&exe))[0].hooks, "installed");
+    }
+
+    #[test]
+    fn hooks_installed_before_the_state_file_existed_also_survive_an_upgrade() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply(Action::Install, &[p.clone()], Some(&exe)); // no state recorded
+        assert!(!w.state.exists());
+        uninstall_cleanup(&[p.clone()], Some(&w.state), &exe);
+        assert_eq!(startup_repair(&w.state, &exe).len(), 1);
+        assert_eq!(profile_views(&[p], Some(&exe))[0].hooks, "installed");
+    }
+
+    #[test]
+    fn entries_deleted_by_hand_are_not_resurrected() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&exe), Some(&w.state));
+        // The user edits settings.json and removes our entries without the application.
+        fs::write(p.path.join("settings.json"), "{}\n").unwrap();
+        assert!(startup_repair(&w.state, &exe).is_empty());
+        assert_eq!(w.settings(&p), "{}\n");
+        assert!(!w.state.exists(), "the record is dropped");
+    }
+
+    #[test]
+    fn a_moved_installation_repairs_its_dangling_entries() {
+        let w = World::new();
+        let old = w.install("old-place");
+        let p = w.profile(".claude");
+        apply_recorded(Action::Install, &[p.clone()], Some(&old), Some(&w.state));
+        fs::remove_dir_all(w.root.join("old-place")).unwrap();
+        let new = w.install("new-place");
+        assert_eq!(profile_views(&[p.clone()], Some(&new))[0].hooks, "broken");
+        assert_eq!(startup_repair(&w.state, &new).len(), 1);
+        assert_eq!(profile_views(&[p], Some(&new))[0].hooks, "installed");
+        assert!(same_path(&HookState::load(&w.state).managed[0].exe, &new));
+    }
+
+    #[test]
+    fn uninstalling_one_copy_keeps_the_entries_of_another_copy() {
+        let w = World::new();
+        let installed = w.install("installed");
+        let portable = w.install("portable");
+        let a = w.profile(".claude");
+        let b = w.profile(".claude-work");
+        apply_recorded(Action::Install, &[a.clone()], Some(&installed), Some(&w.state));
+        apply_recorded(Action::Install, &[b.clone()], Some(&portable), Some(&w.state));
+        let portable_settings = w.settings(&b);
+
+        let report = uninstall_cleanup(&[a.clone(), b.clone()], Some(&w.state), &installed);
+        assert_eq!(report.cleaned.len(), 1);
+        assert!(!w.settings(&a).contains("cpanel-hook"));
+        assert_eq!(w.settings(&b), portable_settings, "the portable copy keeps working");
+        assert_eq!(w.backups(&b), 0, "its settings file was not rewritten");
+        // The portable copy's record is untouched and not marked for restoration.
+        let state = HookState::load(&w.state);
+        let record = state.managed.iter().find(|r| same_path(&r.exe, &portable)).unwrap();
+        assert!(!record.restore);
+    }
+
+    #[test]
+    fn uninstalling_also_removes_entries_whose_executable_is_gone() {
+        let w = World::new();
+        let installed = w.install("installed");
+        let gone = w.install("gone");
+        let p = w.profile(".claude");
+        apply(Action::Install, &[p.clone()], Some(&gone));
+        fs::remove_dir_all(w.root.join("gone")).unwrap();
+        let report = uninstall_cleanup(&[p.clone()], Some(&w.state), &installed);
+        assert_eq!(report.cleaned.len(), 1);
+        assert!(!w.settings(&p).contains("cpanel-hook"));
+    }
+
+    #[test]
+    fn uninstalling_covers_recorded_files_outside_the_discovered_profiles() {
+        let w = World::new();
+        let exe = w.install("app");
+        let discovered = w.profile(".claude");
+        let custom = w.profile("custom-config-dir");
+        apply_recorded(Action::Install, &[custom.clone()], Some(&exe), Some(&w.state));
+        // The uninstaller only discovers `.claude`, yet cleans the recorded file too.
+        let report = uninstall_cleanup(&[discovered], Some(&w.state), &exe);
+        assert_eq!(report.cleaned.len(), 1);
+        assert!(!w.settings(&custom).contains("cpanel-hook"));
+    }
+
+    #[test]
+    fn files_that_could_not_be_cleaned_are_reported_and_clean_ones_are_not() {
+        let w = World::new();
+        let exe = w.install("app");
+        let broken = w.profile(".claude");
+        let unrelated = w.profile(".claude-work");
+        let missing = w.profile(".claude-empty");
+        // Unparsable, but visibly containing our entry.
+        fs::write(broken.path.join("settings.json"), format!("{{ // comment\n \"x\": \"{exe}\" }}")).unwrap();
+        // Unparsable without any trace of us: not our problem.
+        fs::write(unrelated.path.join("settings.json"), "{ // comment\n}").unwrap();
+
+        let report = uninstall_cleanup(&[broken.clone(), unrelated, missing], Some(&w.state), &exe);
+        assert!(report.cleaned.is_empty());
+        assert_eq!(report.leftovers.len(), 1);
+        assert!(same_path(&report.leftovers[0].file, &display(&broken.path.join("settings.json"))));
+        assert!(report.leftovers[0].reason.contains("not valid JSON"));
+        // Nothing was written anywhere.
+        assert_eq!(w.backups(&broken), 0);
+    }
+
+    #[test]
+    fn the_leftover_report_lists_paths_and_stays_within_the_limit() {
+        let item = |file: &str| Leftover { file: file.into(), reason: "x".into() };
+        assert_eq!(leftover_report(&[], 600), "");
+        assert_eq!(leftover_report(&[item("C:/a/settings.json"), item("C:/b/settings.json")], 600), "C:/a/settings.json\r\nC:/b/settings.json\r\n");
+        let many: Vec<Leftover> = (0..50).map(|i| item(&format!("C:/Users/example/profile-{i:02}/settings.json"))).collect();
+        let text = leftover_report(&many, 300);
+        assert!(text.chars().count() <= 320, "{}", text.len());
+        assert!(text.ends_with("more)\r\n"), "{text}");
+        assert!(text.starts_with("C:/Users/example/profile-00/settings.json\r\n"));
+    }
+
+    #[test]
+    fn a_clean_machine_is_a_complete_no_op() {
+        let w = World::new();
+        let exe = w.install("app");
+        let p = w.profile(".claude");
+        fs::write(p.path.join("settings.json"), "{\n  \"model\": \"opus\"\n}\n").unwrap();
+        let report = uninstall_cleanup(&[p.clone()], Some(&w.state), &exe);
+        assert_eq!(report, CleanupReport::default());
+        assert_eq!(w.backups(&p), 0);
+        assert!(!w.state.exists());
+        assert_eq!(expected_hook_exe(&w.root.join("app").join("claude-panel.exe")).unwrap(), exe);
     }
 }

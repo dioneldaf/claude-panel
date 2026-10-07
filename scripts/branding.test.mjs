@@ -8,6 +8,7 @@ describe("branding", () => {
   it("uses one product name in the frontend, the Rust core, the window and the page", () => {
     const tauri = JSON.parse(read("src-tauri/tauri.conf.json"));
     expect(tauri.productName).toBe(PRODUCT_NAME);
+    expect(read("crates/cpanel-core/src/lib.rs")).toContain(`pub const APP_IDENTIFIER: &str = "${tauri.identifier}";`);
     expect(tauri.app.windows[0].title).toBe(PRODUCT_NAME);
     expect(read("crates/cpanel-core/src/lib.rs")).toContain(`pub const PRODUCT_NAME: &str = "${PRODUCT_NAME}";`);
     expect(read("index.html")).toContain(`<title>${PRODUCT_NAME}</title>`);

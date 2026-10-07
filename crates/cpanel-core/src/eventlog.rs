@@ -25,6 +25,13 @@ impl EventLog {
         let _ = self.try_append(line);
     }
 
+    /// Appends several lines as they are (line breaks kept).
+    pub fn append_block(&self, text: &str) {
+        for line in text.lines() {
+            self.append(line);
+        }
+    }
+
     fn try_append(&self, line: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;

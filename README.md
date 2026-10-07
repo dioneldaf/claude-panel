@@ -113,6 +113,14 @@ Installing is safe to undo:
 
 Open sessions pick up hook changes after they are restarted.
 
+The application remembers which settings files hooks were installed into
+(`%APPDATA%\io.github.dioneldaf.claude-panel\hooks-state.json`). If those entries
+disappear without the user asking for it (an upgrade that runs the previous
+uninstaller, a cancelled uninstall) or end up pointing at a folder that no longer
+exists (the installation moved), they are restored the next time the application
+starts, with the usual backup. Entries removed with **Remove hooks**, or deleted by
+hand from `settings.json`, are not restored.
+
 The entry added for each event looks like this:
 
 ```json
@@ -146,9 +154,19 @@ The entry added for each event looks like this:
 ## Uninstall
 
 Use **Settings > Apps > Installed apps**, or the uninstaller in the installation
-folder. Before deleting any file the uninstaller runs `claude-panel.exe --remove-hooks`
-for every profile and deletes the launch-at-sign-in entry, so no hook is left pointing
-at a missing executable.
+folder. Before deleting any file the uninstaller removes the hook entries of this
+installation from every profile and from every other settings file hooks were
+installed into, and deletes the launch-at-sign-in entry, so no hook is left pointing
+at a missing executable. Entries that belong to another copy of the application (a
+portable folder, for example) are left alone.
+
+If a settings file cannot be cleaned (it is not plain JSON, is hard-linked, or keeps
+changing), the uninstaller names it in a message; a silent uninstall writes the same
+to `%LOCALAPPDATA%\io.github.dioneldaf.claude-panel\logs\uninstall-cleanup.log`.
+Clean those files as described below.
+
+Upgrading by running a newer installer keeps the hooks: if the previous version is
+uninstalled first, the new version restores them on its first start.
 
 **Portable build:** remove the hooks (plug button or `claude-panel.exe --remove-hooks`)
 and clear **Launch at sign-in** before deleting the folder.
@@ -179,8 +197,17 @@ whose `command` ends in `cpanel-hook.exe` from each `settings.json` under
 - Not handled: permission bits of the rewritten settings file on non-Windows systems;
   numbers beyond 64-bit precision in `settings.json` would be reformatted; old
   backups are never pruned.
-- The uninstaller's hook removal and the installer itself have not yet been exercised
-  on a clean machine for this first release.
+- If the launch-at-sign-in value is deleted outside the application (for example with
+  the registry editor) while the tray option is on, the installed application writes
+  it again on its next start. Use the tray option to turn it off.
+- After an upgrade that uninstalls the previous version first, the hooks are missing
+  until the new version has been started once. Each such upgrade leaves two extra
+  backups per settings file.
+- Running `uninstall.exe` by hand with the `_?=` argument looks like an upgrade to the
+  uninstaller: the hooks are removed, but `hooks-state.json` is kept and would restore
+  them if the application were installed again.
+- The installer, the uninstaller's clean-up and the upgrade path have not yet been
+  exercised on a clean machine for this first release.
 
 ## Build from source
 
@@ -202,6 +229,7 @@ Useful options of `claude-panel.exe`:
 | `--demo-cycle` | As `--demo`, and all sessions close every 26 seconds to show the exit and entrance. |
 | `--config-dir <dir>` | Limit hook actions to one configuration directory (repeatable). |
 | `--dry-run` | With `--install-hooks` or `--remove-hooks`: print the changes only. |
+| `--uninstall-cleanup` | Used by the uninstaller: remove this installation's hook entries everywhere. |
 
 The release build is a GUI application, so command-line output is visible only when it
 is piped or redirected (for example `claude-panel.exe --hooks-status | more`).

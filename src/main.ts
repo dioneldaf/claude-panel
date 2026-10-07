@@ -429,7 +429,14 @@ async function start(): Promise<void> {
     snapshot = next;
     render();
   });
-  backend.onUi((ui) => setMuted(ui.muted));
+  backend.onUi((ui) => {
+    setMuted(ui.muted);
+    // Mode flipped from the tray while nothing is on screen: apply it silently.
+    if (ui.mini !== mini) {
+        mini = ui.mini;
+        applyMode();
+    }
+  });
   backend.onToggleMini(() => setMode(!mini));
 
   btnMute.addEventListener("click", () => backend.setMuted(!btnMute.hasAttribute("data-muted")));

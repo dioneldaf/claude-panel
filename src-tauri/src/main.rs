@@ -9,6 +9,7 @@ mod drag;
 mod engine;
 mod hooks;
 mod persist;
+mod policy;
 mod probe;
 
 use cpanel_core::presence::Phase;
@@ -101,16 +102,42 @@ fn toggle_autostart(app: &AppHandle) {
     }
 }
 
+fn current_phase(app: &AppHandle) -> Phase {
+    app.state::<AppState>().engine.lock().unwrap().phase()
+}
+
+/// Tray "Show / Hide". With no sessions there is nothing to show; the panel
+/// returns by itself when one opens.
 fn toggle_visibility(app: &AppHandle) {
-    // With no sessions there is nothing to show; the panel returns by itself.
-    if app.state::<AppState>().engine.lock().unwrap().phase() == Phase::Hidden {
+    let Some(window) = app.get_webview_window("main") else {
         return;
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) {
-            let _ = window.hide();
-        } else {
+    };
+    match policy::tray_visibility_toggle(current_phase(app), window.is_visible().unwrap_or(false)) {
+        policy::VisibilityToggle::Show => {
             let _ = window.show();
+        }
+        policy::VisibilityToggle::Hide => {
+            let _ = window.hide();
+        }
+        policy::VisibilityToggle::Ignore => {}
+    }
+}
+
+/// Tray "Toggle mini mode". While nothing is on screen only the stored mode
+/// changes; the window is never shown from here in that case.
+fn toggle_mini(app: &AppHandle) {
+    let window = app.get_webview_window("main");
+    let visible = window.as_ref().is_some_and(|w| w.is_visible().unwrap_or(false));
+    match policy::tray_mini_toggle(current_phase(app), visible) {
+        policy::MiniToggle::PersistOnly => {
+            let payload = save_ui(app, |ui| ui.mini = !ui.mini);
+            let _ = app.emit("ui", payload);
+        }
+        policy::MiniToggle::Animate { show_first } => {
+            if let (true, Some(window)) = (show_first, &window) {
+                let _ = window.show();
+            }
+            let _ = app.emit("toggle-mini", ());
         }
     }
 }
@@ -180,7 +207,7 @@ fn hooks_action(app: AppHandle, action: String) -> Result<Vec<hooks::ActionResul
         return Err("Hook actions are disabled in demo mode.".into());
     }
     let dirs = hooks::config_dirs(&state.config_dirs);
-    let results = hooks::apply(action, &dirs, state.hook_exe.as_deref());
+    let results = hooks::apply_recorded(action, &dirs, state.hook_exe.as_deref(), hooks::state_path().as_deref());
     engine::refresh_profiles(&app);
     engine::publish(&app);
     Ok(results)
@@ -228,12 +255,7 @@ fn build_tray(app: &AppHandle, muted: bool) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => toggle_visibility(app),
-            "mini" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                }
-                let _ = app.emit("toggle-mini", ());
-            }
+            "mini" => toggle_mini(app),
             "mute" => {
                 let muted = !app.state::<AppState>().ui.lock().unwrap().muted;
                 set_muted_everywhere(app, muted);
@@ -309,8 +331,12 @@ fn run_app(options: cli::Options) {
 
 /// Shows the window; called by the frontend after its first layout.
 #[tauri::command]
-fn show_window(window: WebviewWindow) {
-    let _ = window.show();
+fn show_window(app: AppHandle, window: WebviewWindow) {
+    // The frontend asks at the start of an entrance; a stale request that arrives
+    // after the panel went back to hidden must not put an empty window on screen.
+    if policy::may_show(current_phase(&app)) {
+        let _ = window.show();
+    }
 }
 
 fn main() {

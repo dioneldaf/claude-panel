@@ -189,6 +189,11 @@ pub fn start(app: AppHandle) {
     }
     start_listener(app.clone());
     std::thread::spawn(move || {
+        // Restore hook entries that an upgrade or a cancelled uninstall removed,
+        // or that dangle after the installation moved. A no-op when all is well.
+        if let (Some(state_file), Some(exe)) = (hooks::state_path(), app.state::<AppState>().hook_exe.clone()) {
+            hooks::startup_repair(&state_file, &exe);
+        }
         let probe = OsProbe;
         let mut dirs = Vec::new();
         let mut tick = 0u32;

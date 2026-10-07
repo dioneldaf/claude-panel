@@ -32,6 +32,11 @@ First public release.
   with a tray checkbox; never re-enabled by an upgrade once turned off.
 - Hook entries that point to a missing executable are reported as broken and can be
   repaired or removed from the panel.
+- Hooks survive an upgrade, a cancelled uninstall and a moved installation: the
+  settings files they were installed into are remembered and repaired on start.
+- The uninstaller removes only the entries of the installation being removed (and
+  dangling ones), covers settings files outside the default profiles, retries when a
+  file changes, never hangs, and names any file it could not clean.
 - Demo mode with fake sessions, and a demo cycle that closes and reopens all sessions.
 - Windows installer (per user, no administrator rights) that removes the hook entries
   and the sign-in entry on uninstall, and a portable archive with checksums.
