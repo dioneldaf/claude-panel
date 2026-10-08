@@ -11,6 +11,7 @@ use cpanel_core::hook_event::{accept, MAX_DATAGRAM};
 use cpanel_core::model::{ProfileView, SessionView, Snapshot};
 use cpanel_core::notify::{Notice, NoticeKind, Notifier, NotifierConfig};
 use cpanel_core::reducer::{Reducer, ReducerConfig};
+use cpanel_core::sound::{Cue, SoundGate};
 use cpanel_core::registry::{scan_sessions_dir, ConfigDir};
 use std::net::UdpSocket;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,10 +24,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const DISCOVERY_EVERY: u32 = 10;
 const DEMO_INTERVAL: Duration = Duration::from_millis(500);
 const EVENT_LOG_MAX_BYTES: u64 = 1024 * 1024;
+/// Minimum time between two notification sounds across all sessions.
+const SOUND_GAP_MS: u64 = 2000;
 
 pub struct Engine {
     reducer: Reducer,
     notifier: Notifier,
+    sound_gate: SoundGate,
     profiles: Vec<ProfileView>,
     sessions: Vec<SessionView>,
     listener_ok: bool,
@@ -41,6 +45,7 @@ impl Engine {
         Self {
             reducer: Reducer::new(ReducerConfig::default()),
             notifier: Notifier::new(NotifierConfig::default()),
+            sound_gate: SoundGate::new(SOUND_GAP_MS),
             profiles: Vec::new(),
             sessions: Vec::new(),
             // Demo mode has no listener; do not show a port warning for it.
@@ -73,7 +78,9 @@ pub fn now_ms() -> u64 {
 /// Recomputes the view, emits it when it changed and shows due notifications.
 pub fn publish(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let (changed, notices, phase) = {
+    let ui = state.ui.lock().unwrap().clone();
+    let alerts = crate::policy::alert_outputs(ui.muted, ui.sound);
+    let (changed, notices, phase, cue) = {
         let mut engine = state.engine.lock().unwrap();
         let now = now_ms();
         engine.sessions = match (engine.demo, engine.demo_cycle) {
@@ -91,7 +98,9 @@ pub fn publish(app: &AppHandle) {
             engine.last_emitted = Some(snapshot.clone());
             snapshot
         });
-        (changed, notices, phase)
+        // One cue per batch, the most urgent, and rate-limited across sessions.
+        let cue = Cue::for_notices(&notices).filter(|_| alerts.sound && engine.sound_gate.allow(now));
+        (changed, notices, phase, cue)
     };
     if let Some(snapshot) = changed {
         let _ = app.emit("snapshot", snapshot);
@@ -99,10 +108,13 @@ pub fn publish(app: &AppHandle) {
     if let Some(phase) = phase {
         apply_phase(app, phase);
     }
-    if !notices.is_empty() && !state.ui.lock().unwrap().muted {
+    if alerts.toast {
         for notice in notices {
             show_notice(app, &notice);
         }
+    }
+    if let Some(cue) = cue {
+        crate::sound::play(cue);
     }
 }
 
@@ -154,6 +166,9 @@ fn notify_waiting(app: &AppHandle) {
         .show();
 }
 
+/// Toasts never set a sound name: notify-rust then hands `None` to
+/// tauri-winrt-notification, which writes `<audio silent="true"/>`. The panel plays
+/// its own cue instead (`crate::sound`), so the Windows default never plays on top.
 fn show_notice(app: &AppHandle, notice: &Notice) {
     let (title, body) = match notice.kind {
         NoticeKind::NeedsYou => (

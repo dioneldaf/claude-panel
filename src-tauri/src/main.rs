@@ -11,6 +11,7 @@ mod hooks;
 mod persist;
 mod policy;
 mod probe;
+mod sound;
 
 use cpanel_core::presence::Phase;
 use engine::Engine;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub dragging: Arc<AtomicBool>,
     pub drag_release: Arc<AtomicBool>,
     pub mute_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    pub sound_item: Mutex<Option<CheckMenuItem<Wry>>>,
     pub autostart_item: Mutex<Option<CheckMenuItem<Wry>>>,
 }
 
@@ -90,6 +92,18 @@ pub fn set_tray_tooltip(app: &AppHandle, phase: Phase) {
     };
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(text));
+    }
+}
+
+/// Tray "Notification sound": toasts stay, only the sound is switched.
+fn toggle_sound(app: &AppHandle) {
+    let mut enabled = false;
+    save_ui(app, |ui| {
+        ui.sound = !ui.sound;
+        enabled = ui.sound;
+    });
+    if let Some(item) = app.state::<AppState>().sound_item.lock().unwrap().as_ref() {
+        let _ = item.set_checked(enabled);
     }
 }
 
@@ -235,18 +249,20 @@ fn restore_position(window: &WebviewWindow, ui: &UiState) {
     }
 }
 
-fn build_tray(app: &AppHandle, muted: bool) -> tauri::Result<()> {
+fn build_tray(app: &AppHandle, muted: bool, sound: bool) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
     let mini = MenuItem::with_id(app, "mini", "Toggle mini mode", true, None::<&str>)?;
     let mute = CheckMenuItem::with_id(app, "mute", "Mute notifications", true, muted, None::<&str>)?;
+    let sound = CheckMenuItem::with_id(app, "sound", "Notification sound", true, sound, None::<&str>)?;
     let sign_in =
         CheckMenuItem::with_id(app, "autostart", "Launch at sign-in", true, autostart::enabled(), None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&toggle, &mini, &mute, &sign_in, &PredefinedMenuItem::separator(app)?, &quit],
+        &[&toggle, &mini, &mute, &sound, &sign_in, &PredefinedMenuItem::separator(app)?, &quit],
     )?;
     *app.state::<AppState>().mute_item.lock().unwrap() = Some(mute);
+    *app.state::<AppState>().sound_item.lock().unwrap() = Some(sound);
     *app.state::<AppState>().autostart_item.lock().unwrap() = Some(sign_in);
 
     let mut tray = TrayIconBuilder::with_id("main")
@@ -260,6 +276,7 @@ fn build_tray(app: &AppHandle, muted: bool) -> tauri::Result<()> {
                 let muted = !app.state::<AppState>().ui.lock().unwrap().muted;
                 set_muted_everywhere(app, muted);
             }
+            "sound" => toggle_sound(app),
             "autostart" => toggle_autostart(app),
             "quit" => app.exit(0),
             _ => {}
@@ -313,9 +330,10 @@ fn run_app(options: cli::Options) {
                 dragging: Arc::new(AtomicBool::new(false)),
                 drag_release: Arc::new(AtomicBool::new(false)),
                 mute_item: Mutex::new(None),
+                sound_item: Mutex::new(None),
                 autostart_item: Mutex::new(None),
             });
-            build_tray(&handle, ui.muted)?;
+            build_tray(&handle, ui.muted, ui.sound)?;
             if let Some(window) = app.get_webview_window("main") {
                 restore_position(&window, &ui);
                 // The window stays hidden until a session exists; the frontend
@@ -344,6 +362,9 @@ fn main() {
     if options.help {
         print!("{}", cli::usage());
         return;
+    }
+    if options.play_sounds {
+        std::process::exit(sound::preview());
     }
     if let Some(command) = options.hooks {
         std::process::exit(cli::run_hooks(command, &options));

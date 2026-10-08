@@ -15,6 +15,7 @@ pub mod presence;
 pub mod reducer;
 pub mod registry;
 pub mod settings;
+pub mod sound;
 pub mod textdiff;
 
 /// Product name shown in the tray, command-line help and messages. The window

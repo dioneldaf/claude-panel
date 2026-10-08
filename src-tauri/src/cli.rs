@@ -17,6 +17,8 @@ pub struct Options {
     /// Explicit config directories; empty means auto-discovery.
     pub config_dirs: Vec<PathBuf>,
     pub help: bool,
+    /// Hidden: play both notification cues once and exit (sound preview).
+    pub play_sounds: bool,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -73,6 +75,7 @@ pub fn parse(args: impl IntoIterator<Item = String>, demo_env: Option<&str>) -> 
             "--dry-run" => options.dry_run = true,
             "--config-dir" => options.config_dirs.extend(it.next().map(PathBuf::from)),
             "--help" | "-h" => options.help = true,
+            "--play-sounds" => options.play_sounds = true,
             _ => {}
         }
     }
@@ -223,6 +226,14 @@ mod tests {
         assert_eq!(o.config_dirs, vec![PathBuf::from("C:/a"), PathBuf::from("C:/b")]);
         assert_eq!(parse_list(&["--remove-hooks"], None).hooks, Some(HooksCommand::Remove));
         assert_eq!(parse_list(&["--hooks-status"], None).hooks, Some(HooksCommand::Status));
+    }
+
+    #[test]
+    fn play_sounds_is_a_hidden_preview_flag() {
+        let o = parse_list(&["--play-sounds"], None);
+        assert!(o.play_sounds && !o.demo && o.hooks.is_none());
+        assert!(!parse_list(&[], None).play_sounds);
+        assert!(!usage().contains("--play-sounds"));
     }
 
     #[test]

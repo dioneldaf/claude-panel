@@ -1,4 +1,4 @@
-//! Decisions about showing the window, kept pure so they can be tested.
+//! Decisions about showing the window and raising alerts, kept pure so they can be tested.
 //!
 //! Invariant: while the presence phase is `Hidden` (no sessions) the window is
 //! never shown. A shown window whose content is hidden would be an invisible,
@@ -45,6 +45,18 @@ pub fn tray_visibility_toggle(phase: Phase, window_visible: bool) -> VisibilityT
         (true, true) => VisibilityToggle::Hide,
         (true, false) => VisibilityToggle::Show,
     }
+}
+
+/// What a due notification produces.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Alerts {
+    pub toast: bool,
+    pub sound: bool,
+}
+
+/// "Mute notifications" silences everything; "Notification sound" only the sound.
+pub fn alert_outputs(muted: bool, sound_enabled: bool) -> Alerts {
+    Alerts { toast: !muted, sound: !muted && sound_enabled }
 }
 
 #[cfg(test)]
@@ -95,5 +107,13 @@ mod tests {
             assert_eq!(tray_visibility_toggle(phase, true), VisibilityToggle::Hide);
             assert_eq!(tray_visibility_toggle(phase, false), VisibilityToggle::Show);
         }
+    }
+
+    #[test]
+    fn mute_silences_toasts_and_sound_while_the_sound_switch_only_drops_the_sound() {
+        assert_eq!(alert_outputs(false, true), Alerts { toast: true, sound: true });
+        assert_eq!(alert_outputs(false, false), Alerts { toast: true, sound: false });
+        assert_eq!(alert_outputs(true, true), Alerts { toast: false, sound: false });
+        assert_eq!(alert_outputs(true, false), Alerts { toast: false, sound: false });
     }
 }
