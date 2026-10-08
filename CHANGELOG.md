@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-07
+
+### Fixed
+
+- Sessions with a running subagent no longer fall back to "done" or "paused" after
+  about 30 seconds. Claude Code reports `SubagentStop` for internal agents that never
+  sent `SubagentStart`; subagents are now tracked by agent id and only a stop that
+  matches a known start ends one. Subagents already running when the panel starts
+  are detected from their activity.
+
 ## [0.1.0] - 2026-10-07
 
 First public release.

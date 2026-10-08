@@ -1,7 +1,7 @@
 {
   "name": "claude-panel",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Always-on-top widget showing the live state of Claude Code sessions (unofficial).",
   "license": "MIT",
   "author": "Dionel",

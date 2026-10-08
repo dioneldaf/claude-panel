@@ -254,6 +254,55 @@ fn idle_with_running_subagents_is_waiting_subagent() {
     assert_eq!(only(&mut r, 60).subagents, 0);
 }
 
+fn agent(id: &str, event: &str, agent_id: &str, ts: u64) -> HookSummary {
+    HookSummary { agent_id: Some(agent_id.into()), ..hook(id, event, ts) }
+}
+
+#[test]
+fn a_stop_for_an_agent_that_never_started_does_not_end_a_running_subagent() {
+    // Claude Code emits SubagentStop for internal agents that never sent SubagentStart.
+    let mut r = new();
+    r.apply_registry(vec![reg(1, "a", "busy", 1)], 1);
+    r.apply_hook(&hook("a", "UserPromptSubmit", 10), 10);
+    r.apply_hook(&agent("a", "SubagentStart", "worker", 20), 20);
+    r.apply_hook(&hook("a", "Stop", 30), 30);
+    r.apply_hook(&agent("a", "SubagentStop", "ghost-1", 40), 40);
+    r.apply_hook(&agent("a", "SubagentStop", "ghost-2", 50), 50);
+    let v = only(&mut r, 50);
+    assert_eq!(v.state, SessionState::WaitingSubagent);
+    assert_eq!(v.subagents, 1);
+    r.apply_hook(&agent("a", "SubagentStop", "worker", 60), 60);
+    assert_eq!(state(&mut r, 60), SessionState::Done);
+}
+
+#[test]
+fn subagents_are_tracked_by_id_and_duplicate_events_count_once() {
+    let mut r = new();
+    r.apply_registry(vec![reg(1, "a", "busy", 1)], 1);
+    r.apply_hook(&agent("a", "SubagentStart", "one", 10), 10);
+    r.apply_hook(&agent("a", "SubagentStart", "one", 11), 11);
+    r.apply_hook(&agent("a", "SubagentStart", "two", 12), 12);
+    r.apply_hook(&hook("a", "Stop", 20), 20);
+    assert_eq!(only(&mut r, 20).subagents, 2);
+    r.apply_hook(&agent("a", "SubagentStop", "two", 30), 30);
+    r.apply_hook(&agent("a", "SubagentStop", "two", 31), 31);
+    let v = only(&mut r, 31);
+    assert_eq!(v.state, SessionState::WaitingSubagent);
+    assert_eq!(v.subagents, 1);
+}
+
+#[test]
+fn activity_from_a_subagent_whose_start_was_missed_counts_as_running() {
+    // The panel may start after the subagent did.
+    let mut r = new();
+    r.apply_registry(vec![reg(1, "a", "busy", 1)], 1);
+    r.apply_hook(&hook("a", "Stop", 10), 10);
+    r.apply_hook(&agent("a", "PreToolUse", "late", 20), 20);
+    assert_eq!(state(&mut r, 20), SessionState::WaitingSubagent);
+    r.apply_hook(&agent("a", "SubagentStop", "late", 30), 30);
+    assert_eq!(state(&mut r, 30), SessionState::Done);
+}
+
 #[test]
 fn subagent_counter_expires_when_the_session_goes_silent() {
     let mut r = new();

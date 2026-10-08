@@ -13,7 +13,7 @@
 use crate::hook_event::HookSummary;
 use crate::model::{folder_of, SessionState, SessionView};
 use crate::registry::RegistryEntry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Debug)]
 pub struct ReducerConfig {
@@ -75,13 +75,31 @@ struct Attention {
 struct HookTrack {
     main: Option<(MainPhase, u64)>,
     attention: Option<Attention>,
-    subagents: u32,
+    /// Subagents seen starting (or working) and not yet stopped, by agent id.
+    subagents: HashSet<String>,
+    /// Subagents whose events carried no id; only id-less stops end them.
+    anonymous_subagents: u32,
+    /// Recently stopped agent ids, so late tool events do not revive them.
+    finished: VecDeque<String>,
     background: u32,
     background_at: u64,
     last_event_at: u64,
 }
 
 impl HookTrack {
+    fn running_subagents(&self) -> u32 {
+        u32::try_from(self.subagents.len()).unwrap_or(u32::MAX).saturating_add(self.anonymous_subagents)
+    }
+
+    fn remember_finished(&mut self, id: &str) {
+        if !self.finished.iter().any(|f| f == id) {
+            if self.finished.len() >= MAX_FINISHED_AGENTS {
+                self.finished.pop_front();
+            }
+            self.finished.push_back(id.to_owned());
+        }
+    }
+
     /// Timestamp of the newest phase information, if any.
     fn phase_at(&self) -> Option<u64> {
         let main = self.main.map(|(_, at)| at);
@@ -105,6 +123,8 @@ pub struct Reducer {
     hooks: HashMap<String, HookTrack>,
 }
 
+/// How many stopped agent ids each session remembers.
+const MAX_FINISHED_AGENTS: usize = 64;
 const ASKING_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 /// Tools that leave something running after the turn. `Monitor` is unverified.
 const BACKGROUND_TOOLS: [&str; 2] = ["Bash", "Monitor"];
@@ -183,6 +203,14 @@ impl Reducer {
             }
         };
 
+        // Activity from a subagent whose start was missed (e.g. the panel started later).
+        if let Some(id) = &ev.agent_id {
+            let lifecycle = matches!(ev.event.as_str(), "SubagentStart" | "SubagentStop");
+            if !lifecycle && !track.finished.contains(id) {
+                track.subagents.insert(id.clone());
+            }
+        }
+
         match ev.event.as_str() {
             "SessionStart" => {
                 *track = HookTrack { main: Some((MainPhase::Idle, ts)), last_event_at: ts, ..Default::default() };
@@ -223,8 +251,21 @@ impl Reducer {
                     track.main = Some((MainPhase::Idle, ts));
                 }
             }
-            "SubagentStart" => track.subagents += 1,
-            "SubagentStop" => track.subagents = track.subagents.saturating_sub(1),
+            "SubagentStart" => match &ev.agent_id {
+                Some(id) => {
+                    track.subagents.insert(id.clone());
+                }
+                None => track.anonymous_subagents += 1,
+            },
+            // Claude Code also reports stops for internal agents that never sent a
+            // SubagentStart; only a stop matching a known start ends a subagent.
+            "SubagentStop" => match &ev.agent_id {
+                Some(id) => {
+                    track.subagents.remove(id);
+                    track.remember_finished(id);
+                }
+                None => track.anonymous_subagents = track.anonymous_subagents.saturating_sub(1),
+            },
             // TaskCreated, TaskCompleted and future events only count as activity.
             _ => {}
         }
@@ -305,7 +346,7 @@ fn live_subagents(config: &ReducerConfig, hook: &HookTrack, now: u64) -> u32 {
     if now.saturating_sub(hook.last_event_at) > config.subagent_ttl_ms {
         0
     } else {
-        hook.subagents
+        hook.running_subagents()
     }
 }
 
